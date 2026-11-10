@@ -1,6 +1,6 @@
 {
   "name": "@lanbaolu/dsh-composer-butler",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "输入框工具栏按钮管家：统一列出 composer 上的所有控件，逐项开关显隐，状态持久化，重启不丢",
   "private": true,
   "type": "module",
