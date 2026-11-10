@@ -1,0 +1,44 @@
+{
+  "name": "@lanbaolu/dsh-composer-butler",
+  "version": "0.1.0",
+  "description": "输入框工具栏按钮管家：统一列出 composer 上的所有控件，逐项开关显隐，状态持久化，重启不丢",
+  "private": true,
+  "type": "module",
+  "main": "./lib/index.js",
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "license": "BSD-3-Clause",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "verify": "npx --yes dsh-plugin-standard@2 . --json"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-client-runtime": ">=0.2.0-rc.1 <1.0.0-0",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.0-rc.6 || >=0.2.0-rc.1 <1.0.0-0",
+    "react": "^18.2.0 || ^19.0.0"
+  }
+}

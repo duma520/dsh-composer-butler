@@ -1,0 +1,30 @@
+# 依赖
+node_modules/
+
+# 运行期数据（属于使用者本机状态，绝不入库）
+state.json
+scan.json
+rules.json
+*.bak
+*.bak-*
+
+# 日志与临时文件
+*.log
+*.tmp
+Thumbs.db
+.DS_Store
+
+# 凭据（宪法红线：任何密钥不得入库）
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.ppk
+id_rsa*
+id_dsa*
+credentials*
+*.secrets
