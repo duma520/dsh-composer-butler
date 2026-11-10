@@ -1,0 +1,1127 @@
+/**
+ * dsh-composer-butler — 浏览器半身。
+ *
+ * 手写 ModuleLoader bundle：零构建、只依赖 shell 已提供的 `react`。
+ * 同一条路线在 dsh-our-free-model 上已跑通（本机无 tsc / 无 DSH checkout）。
+ *
+ * 设计要点（都已对照官方 renderer 源码核实）：
+ *  - 官方 SlotOutlet 渲染 `<div data-slot={slotKey} style="display:contents">`，
+ *    每个 entry 的 SlotErrorBoundary 不额外包 DOM，因此**锚点的直接子元素就是
+ *    各插件自己的根节点** —— 这就是天然的分组边界，隐藏一个子元素 = 隐藏一个插件控件。
+ *  - 官方没有 entry 级可见性属性，所以隐藏用 CSS：给目标元素打 data 属性 +
+ *    注入一条 `[data-composer-butler-hidden]{display:none!important}`。
+ *  - 不硬编码任何中文文案做匹配：控件身份由「运行时指纹」生成
+ *    （slot 名 + aria-label/title/文本/svg path/索引），因此 DSH 改版后
+ *    仍能自动发现新控件，不会因为写死的文案变了就失效。
+ *  - 状态落 localStorage（即时）+ 上报 host 落 state.json（重启不丢）。
+ *
+ * @module client.js
+ */
+
+window.__ModuleLoader__.load({
+  id: '@lanbaolu/dsh-composer-butler',
+  factory: require => {
+    const module = { exports: {} }
+    const exports = module.exports
+    const React = require('react')
+    const { createElement: h, useState, useEffect, useCallback, useRef } = React
+
+    /** 浏览器半身读取的 API 前缀（与 host 半身一致）。 */
+    const API_BASE = '/@lanbaolu/dsh-composer-butler/api'
+    /** localStorage 键：即时持久化。 */
+    const STORAGE_KEY = 'composer-butler.hidden.v1'
+    /** localStorage 键：按钮显示位置（v0.3.0 新增，与隐藏清单分开存）。 */
+    const ANCHORS_KEY = 'composer-butler.anchors.v1'
+    /**
+     * 可选按钮位置清单（v0.3.0）。**只收官方声明为 list 的 slot**：
+     * single 型（conversation.input.permission / model / activity / plan 等）已被官方占用，
+     * 重复注册会直接抛 "slot ... is single"，因此不在候选内。
+     *
+     * 每一项的 order 与官方同类控件对齐（900 = 靠后，不抢官方按钮位置）。
+     * hint 会显示在面板里，说明「什么时候才看得见」——这是实测出来的渲染条件，
+     * 不是猜的（见各官方 client.js 的 renderSlot 调用点）。
+     */
+    const ANCHOR_CATALOG = [
+      { id: 'conversation.composer.dock', name: '输入框底部工具行', hint: '与 tok/s 同排 · 需打开会话', order: 900 },
+      { id: 'conversation.input.left', name: '输入框左侧', hint: '技能 / Computer Use 旁 · 需会话', order: 900 },
+      { id: 'conversation.input.right', name: '输入框右侧', hint: '发送键左边 · 需会话', order: 900 },
+      { id: 'conversation.input.overlay', name: '输入卡片左上浮层', hint: '需打开会话', order: 900 },
+      { id: 'conversation.input.dock', name: '输入框上方排队区', hint: '有排队消息/附件才出现', order: 900 },
+      { id: 'conversation.session.header.actions', name: '会话标题右侧', hint: '有会话即显示', order: 900 },
+      { id: 'conversation.session.header.utilities', name: '会话头部工具区', hint: '有会话即显示', order: 900 },
+      { id: 'sidebar.footer.action', name: '侧栏最底部', hint: '常驻 · 不依赖会话', order: 900 },
+      { id: 'shell.overlay', name: '悬浮球（右下角）', hint: '浮在所有页面上 · 默认不勾', order: 900 },
+    ]
+    /** 默认位置：与 v0.2.1 行为完全一致（输入框底部那一行）。 */
+    const DEFAULT_ANCHORS = ['conversation.composer.dock']
+    /** 隐藏属性名。 */
+    const HIDDEN_ATTR = 'data-composer-butler-hidden'
+    /** 管家自身标记属性：自己扫描自己时排除，且拒绝被隐藏（防自锁）。 */
+    const SELF_ATTR = 'data-composer-butler-self'
+    /** 只看输入框相关 slot；把它们全列出来便于以后扩展。 */
+    const SLOT_PREFIX = 'conversation.input.'
+    /**
+     * 快照取证范围 = 隐藏范围（input.*）+ 我们自己三个入口所在的锚点。
+     * 用显式清单而非 conversation.* 前缀：后者会把正文、用户消息等大量锚点全抓进来。
+     */
+    const EVIDENCE_SLOTS = [
+      'conversation.composer.dock',
+      'sidebar.panellist.actions',
+      // v0.3.0：按钮可以投放到更多位置，这些锚点也要取证，
+      // 否则「按钮在别处渲染了、快照里却查不到」。
+      'conversation.input.left',
+      'conversation.input.right',
+      'conversation.input.overlay',
+      'conversation.input.dock',
+      'conversation.session.header.actions',
+      'conversation.session.header.utilities',
+      'sidebar.footer.action',
+      'shell.overlay',
+    ]
+    /** 注入一次即可的样式表 id。 */
+    const STYLE_ID = 'composer-butler-style'
+
+    const inject = ['slots']
+
+    // ── 样式 ────────────────────────────────────────────────────────────────
+    /** 注入隐藏规则与面板外观。重复调用是幂等的。 */
+    function ensureStyle() {
+      if (document.getElementById(STYLE_ID) !== null) return
+      const style = document.createElement('style')
+      style.id = STYLE_ID
+      style.textContent = [
+        `[${HIDDEN_ATTR}]{display:none!important}`,
+        '.cb-panel{position:fixed;z-index:99999;min-width:320px;max-width:min(92vw,460px);',
+        'max-height:min(70vh,520px);overflow:auto;background:var(--dsh-surface,#fff);',
+        'color:var(--dsh-text,#1f1f1f);border:1px solid var(--dsh-border,#d9d9d9);',
+        'border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.18);padding:10px;',
+        'font-size:13px;line-height:1.5}',
+        '.cb-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}',
+        '.cb-title{font-weight:600}',
+        '.cb-actions{display:flex;gap:6px;flex-wrap:wrap}',
+        '.cb-btn{background:transparent;border:1px solid var(--dsh-border,#d9d9d9);border-radius:6px;',
+        'cursor:pointer;padding:2px 8px;font-size:12px;color:inherit}',
+        '.cb-btn:hover{background:var(--dsh-hover,rgba(0,0,0,.05))}',
+        '.cb-row{display:flex;align-items:center;gap:8px;padding:4px 2px;border-radius:6px}',
+        '.cb-row:hover{background:var(--dsh-hover,rgba(0,0,0,.05))}',
+        '.cb-row label{display:flex;align-items:center;gap:8px;cursor:pointer;flex:1;min-width:0}',
+        '.cb-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+        '.cb-slot{font-size:11px;opacity:.6;font-family:monospace}',
+        '.cb-dup{font-size:11px;color:#c87b22;border:1px solid currentColor;border-radius:4px;padding:0 4px}',
+        '.cb-empty{opacity:.65;padding:8px 2px}',
+        '.cb-section{margin-top:8px;padding-top:8px;border-top:1px solid var(--dsh-border,#eee)}',
+        '.cb-subtitle{font-weight:600;margin-bottom:4px}',
+        // 悬浮球（shell.overlay 位置）：必须自己 fixed，不依赖 overlay 容器的定位。
+        '.cb-float{position:fixed;right:16px;bottom:16px;z-index:9998;width:34px;height:34px;',
+        'border-radius:50%;display:flex;align-items:center;justify-content:center;',
+        'background:var(--dsh-surface,#fff);color:var(--dsh-text,#1f1f1f);',
+        'border:1px solid var(--dsh-border,#d9d9d9);box-shadow:0 4px 14px rgba(0,0,0,.18);',
+        'cursor:pointer;font-size:15px;line-height:1;padding:0}',
+        '.cb-float:hover{background:var(--dsh-hover,rgba(0,0,0,.05))}',
+      ].join('')
+      document.head.appendChild(style)
+    }
+
+    // ── 指纹与控制项目录 ──────────────────────────────────────────────────────
+    /** 取元素最显著的文本标识（截断，去空白）。 */
+    function primaryText(el) {
+      return (el.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 18)
+    }
+
+    /** 取 svg 图标的路径前缀，用于图标型按钮的身份。 */
+    function svgSignature(el) {
+      const p = el.querySelector('svg path')
+      const d = p?.getAttribute('d') ?? ''
+      return d.replace(/\s+/g, '').slice(0, 24)
+    }
+
+    /**
+     * 把会随状态漂移的文案压成稳定名。
+     * 实测教训：PUA 按钮的 aria-label 是「PUA（当前会话已关闭）」↔「PUA（当前会话已开启）」，
+     * 状态一切换整串就变 → 身份必须取括号/冒号/破折号前的前缀。
+     */
+    function stableName(text) {
+      // 刻意不切 ASCII 连字符：否则 "hold-to-dictate" 会被压成 "hold" 造成误碰撞。
+      return text.split(/[，,、（(：:—–]/)[0].trim().slice(0, 24)
+    }
+
+    /**
+     * 为一个控件生成稳定身份。
+     * 优先级：aria-label → title → 文本 → svg 路径 → 同 slot 内序号兜底。
+     * 这样身份跟随「控件语义」，而不是脆弱的 DOM 位置。
+     */
+    function identityOf(el, slot, fallbackIndex) {
+      const aria = (el.getAttribute('aria-label') ?? '').trim()
+      if (aria !== '') return `${slot}::aria::${stableName(aria)}`
+      const title = (el.getAttribute('title') ?? '').trim()
+      if (title !== '') return `${slot}::title::${stableName(title)}`
+      const text = primaryText(el)
+      if (text !== '') return `${slot}::text::${text}`
+      const svg = svgSignature(el)
+      if (svg !== '') return `${slot}::svg::${svg}`
+      return `${slot}::index::${fallbackIndex}`
+    }
+
+    /** 人类可读的控件名（面板展示用）。 */
+    function labelOf(el, index) {
+      const aria = (el.getAttribute('aria-label') ?? '').trim()
+      if (aria !== '') return aria
+      const title = (el.getAttribute('title') ?? '').trim()
+      if (title !== '') return title
+      const text = primaryText(el)
+      if (text !== '') return text
+      return `未命名控件 #${index + 1}`
+    }
+
+    /**
+     * 扫描所有输入框 slot，返回控件清单。
+     * 隐藏单位 = slot 锚点的直接子元素（= 一个插件贡献的一个控件）。
+     */
+    function scanControls() {
+      const found = []
+      const anchors = Array.from(document.querySelectorAll(`[data-slot^="${SLOT_PREFIX}"]`))
+      for (const anchor of anchors) {
+        const slot = anchor.getAttribute('data-slot') ?? ''
+        let index = 0
+        for (const child of Array.from(anchor.children)) {
+          // 管家自己的按钮不参与扫描：用户误关它就再也打不开面板了。
+          if (child.closest(`[${SELF_ATTR}]`) !== null) {
+            continue
+          }
+          const key = identityOf(child, slot, index)
+          found.push({ key, slot, label: labelOf(child, index), element: child })
+          index += 1
+        }
+      }
+      return found
+    }
+
+    // ── 状态持久化 ───────────────────────────────────────────────────────────
+    /**
+     * 隐藏清单的模块级单例。
+     * 实测教训（2026-11-01）：此前 apply 闭包与面板各自持有不同 Set，
+     * 面板勾选只更新自己那份，observer 仍拿旧份 → 新建会话 DOM 重建时
+     * 用旧状态重套用，刚隐藏的按钮又冒出来（用户报"没同步，要再点一次"）。
+     * 所有读写必须经过 getHidden()，保证全局唯一一份。
+     */
+    let hiddenSet = null
+    function getHidden() {
+      if (hiddenSet === null) hiddenSet = new Set(readLocal())
+      return hiddenSet
+    }
+
+    function readLocal() {
+      try {
+        const raw = window.localStorage?.getItem(STORAGE_KEY) ?? ''
+        if (raw === '') return []
+        const parsed = JSON.parse(raw)
+        return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string') : []
+      } catch {
+        return []
+      }
+    }
+
+    function writeLocal(hidden) {
+      try {
+        window.localStorage?.setItem(STORAGE_KEY, JSON.stringify(hidden))
+      } catch {
+        /* 隐私模式/配额满：不阻断功能 */
+      }
+    }
+
+    /**
+     * 按钮显示位置的模块级单例（v0.3.0）。
+     * 与 hidden 同一个教训：面板、设置页、各位置组件必须共享同一份，
+     * 否则「面板里勾了、别处的按钮不响应」。
+     */
+    let anchorSet = null
+    function getAnchors() {
+      if (anchorSet === null) anchorSet = new Set(readAnchorLocal())
+      return anchorSet
+    }
+
+    function readAnchorLocal() {
+      try {
+        const raw = window.localStorage?.getItem(ANCHORS_KEY) ?? ''
+        // 从未设置过 → 用默认位置；显式存成 []（用户全取消勾选）要如实尊重，
+        // 否则「全部取消」会变成「永远回不到空」。
+        if (raw === '') return DEFAULT_ANCHORS.slice()
+        const parsed = JSON.parse(raw)
+        if (!Array.isArray(parsed)) return DEFAULT_ANCHORS.slice()
+        const known = new Set(ANCHOR_CATALOG.map((entry) => entry.id))
+        return parsed.filter((x) => typeof x === 'string' && known.has(x))
+      } catch {
+        return DEFAULT_ANCHORS.slice()
+      }
+    }
+
+    function writeAnchorLocal(anchors) {
+      try {
+        window.localStorage?.setItem(ANCHORS_KEY, JSON.stringify(anchors))
+      } catch {
+        /* 隐私模式/配额满：不阻断功能 */
+      }
+    }
+
+    /** 位置变更的订阅者（各位置的组件靠它即时重渲染）。 */
+    const anchorListeners = new Set()
+    function bumpAnchors() {
+      for (const listener of Array.from(anchorListeners)) {
+        try {
+          listener()
+        } catch {
+          /* 单个订阅者出错不影响其它 */
+        }
+      }
+    }
+
+    /**
+     * 组件里读当前位置并订阅变更。
+     * 返回同一个 Set 引用，但订阅者在变更时会被通知重渲染 —— 所以
+     * `anchors.has(id)` 的判断总是最新的。用递增计数而不是比较版本号：
+     * React 对 setState 同值会直接 bail out，计数保证一定重渲染。
+     */
+    function useAnchors() {
+      const [, force] = useState(0)
+      useEffect(() => {
+        const listener = () => force((n) => n + 1)
+        anchorListeners.add(listener)
+        return () => {
+          anchorListeners.delete(listener)
+        }
+      }, [])
+      return getAnchors()
+    }
+
+    /** 提交一份位置清单：本地落盘 + 上报 host + 通知所有位置组件重渲染。 */
+    function commitAnchors(arr) {
+      const set = getAnchors()
+      set.clear()
+      for (const id of arr) set.add(id)
+      writeAnchorLocal(arr)
+      pushHost(Array.from(getHidden()), arr)
+      bumpAnchors()
+      // ⚠️ 不能同步 reportScan：bumpAnchors 只是通知订阅者，React 的重渲染在之后才提交 DOM。
+      // 同步采集会拍出「anchors 已删掉某位置、DOM 里那个按钮还在」的瞬时快照，
+      // 让排查者以为「没勾选却渲染了」（2026-11-11 实测踩到，差点误判成 gate 失效）。
+      // 推到下一个宏任务，让 React 先把 DOM 落定。
+      setTimeout(reportScan, 0)
+      return set
+    }
+
+    /** 勾/取消单个位置（组件与原生面板共用）。 */
+    function toggleAnchor(id, on) {
+      const next = Array.from(getAnchors())
+      const at = next.indexOf(id)
+      if (on && at < 0) next.push(id)
+      if (!on && at >= 0) next.splice(at, 1)
+      commitAnchors(next)
+    }
+
+    /** 上报 host 落 state.json（失败不影响本地功能）。hidden 与 anchors 一起写，避免互相覆盖。 */
+    function pushHost(hidden, anchors) {
+      void fetch(`${API_BASE}/state`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ hidden, anchors, updatedAt: new Date().toISOString() }),
+      }).catch(() => {})
+    }
+
+    /**
+     * 采集当前工具栏快照并上报 host 落 scan.json。
+     * 这是排查「控件身份漂移」的唯一眼睛：不靠猜 DOM，直接看真实结构。
+     * 上报时机：页面加载后一次 + 每次打开面板一次（面板打开正是需要事实的时候）。
+     */
+    function reportScan() {
+      try {
+        const slots = []
+        // 取证范围 = 隐藏范围（所有 conversation.input.*）+ 我们自己三个入口所在锚点。
+        // 不用 conversation.* 前缀：那会把正文/用户消息等大量锚点全抓进来。
+        const wanted = new Set(EVIDENCE_SLOTS)
+        const anchors = Array.from(document.querySelectorAll('[data-slot]'))
+          .filter((el) => {
+            const key = el.getAttribute('data-slot') ?? ''
+            return key.startsWith(SLOT_PREFIX) || wanted.has(key)
+          })
+        for (const anchor of anchors) {
+          const slot = anchor.getAttribute('data-slot') ?? ''
+          let index = 0
+          const children = []
+          // 我们自己的入口单独记账：SELF_ATTR 排除是为了不让管家把自己列进可隐藏清单，
+          // 但取证时若一并排除，就会出现「按钮其实渲染了、快照里却看不到」的假象。
+          const ours = []
+          for (const child of Array.from(anchor.children)) {
+            const isSelf = child.closest(`[${SELF_ATTR}]`) !== null
+            const record = {
+              key: identityOf(child, slot, index),
+              tag: child.tagName.toLowerCase(),
+              className: typeof child.className === 'string' ? child.className.slice(0, 60) : '',
+              ariaLabel: child.getAttribute('aria-label') ?? '',
+              title: child.getAttribute('title') ?? '',
+              text: (child.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 30),
+              hidden: child.hasAttribute(HIDDEN_ATTR),
+            }
+            if (isSelf) {
+              ours.push(record)
+              continue
+            }
+            children.push(record)
+            index += 1
+          }
+          slots.push({ slot, children, ours })
+        }
+        void fetch(`${API_BASE}/scan`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            capturedAt: new Date().toISOString(),
+            hidden: Array.from(getHidden()),
+            anchors: Array.from(getAnchors()),
+            diag,
+            slots,
+          }),
+        }).catch(() => {})
+      } catch {
+        /* 侦察失败不影响主功能 */
+      }
+    }
+
+    // ── 应用隐藏 ─────────────────────────────────────────────────────────────
+    /** 把 hidden 集合套用到当前 DOM；返回本次实际命中的控件数。 */
+    function applyHidden(hidden) {
+      const set = new Set(hidden)
+      let hit = 0
+      for (const control of scanControls()) {
+        const shouldHide = set.has(control.key)
+        if (shouldHide) {
+          control.element.setAttribute(HIDDEN_ATTR, '1')
+          hit += 1
+        } else {
+          control.element.removeAttribute(HIDDEN_ATTR)
+        }
+      }
+      return hit
+    }
+
+    /**
+     * 提交一份隐藏清单：本地即时落盘 + 上报 host + 套用 DOM + 刷新侦察快照。
+     * 工具栏浮层与「设置」分区共用这一个出口，保证行为完全一致。
+     */
+    function commitHidden(arr) {
+      const set = getHidden()
+      set.clear()
+      for (const key of arr) set.add(key)
+      writeLocal(arr)
+      pushHost(arr, Array.from(getAnchors()))
+      applyHidden(arr)
+      reportScan()
+      return set
+    }
+
+    // ── 面板（原生 DOM，避开 portal 与样式继承问题） ─────────────────────────
+    let panelEl = null
+    let panelCleanup = null
+
+    /** 关闭面板并清理监听。 */
+    function closePanel() {
+      if (panelCleanup !== null) {
+        panelCleanup()
+        panelCleanup = null
+      }
+      if (panelEl !== null) {
+        panelEl.remove()
+        panelEl = null
+      }
+    }
+
+    /** 重新渲染面板列表。 */
+    function renderRows(listEl, hidden, onChange) {
+      listEl.textContent = ''
+      const controls = scanControls()
+      if (controls.length === 0) {
+        const empty = document.createElement('div')
+        empty.className = 'cb-empty'
+        empty.textContent = '未在输入框工具栏发现控件。请先打开一个会话。'
+        listEl.appendChild(empty)
+        return
+      }
+
+      // 统计重复名，用于标注「重复」
+      const nameCount = new Map()
+      for (const c of controls) nameCount.set(c.label, (nameCount.get(c.label) ?? 0) + 1)
+
+      for (const control of controls) {
+        const row = document.createElement('div')
+        row.className = 'cb-row'
+
+        const label = document.createElement('label')
+        const box = document.createElement('input')
+        box.type = 'checkbox'
+        box.checked = hidden.has(control.key)
+        box.addEventListener('change', () => {
+          if (box.checked) hidden.add(control.key)
+          else hidden.delete(control.key)
+          onChange()
+        })
+
+        const name = document.createElement('span')
+        name.className = 'cb-name'
+        name.textContent = control.label
+        name.title = control.key
+
+        label.appendChild(box)
+        label.appendChild(name)
+
+        if ((nameCount.get(control.label) ?? 0) > 1) {
+          const dup = document.createElement('span')
+          dup.className = 'cb-dup'
+          dup.textContent = '重复'
+          dup.title = '同一工具栏里出现了多个同名控件（多半来自两个功能相近的插件）'
+          label.appendChild(dup)
+        }
+
+        const slotTag = document.createElement('span')
+        slotTag.className = 'cb-slot'
+        slotTag.textContent = control.slot.replace(SLOT_PREFIX, '')
+
+        row.appendChild(label)
+        row.appendChild(slotTag)
+        listEl.appendChild(row)
+      }
+    }
+
+    /**
+     * 原生 DOM 版「按钮显示位置」清单（面板用）。
+     * 设置页/插件详情页用 React 版 AnchorPlacement，两者共用同一份状态
+     * （getAnchors / toggleAnchor），所以在哪边改都即时生效。
+     */
+    function renderAnchorRows(container) {
+      container.textContent = ''
+      const current = getAnchors()
+      for (const entry of ANCHOR_CATALOG) {
+        const row = document.createElement('div')
+        row.className = 'cb-row'
+
+        const label = document.createElement('label')
+        const box = document.createElement('input')
+        box.type = 'checkbox'
+        box.checked = current.has(entry.id)
+        box.addEventListener('change', () => {
+          toggleAnchor(entry.id, box.checked)
+          // 回读重绘：组件层可能同时改了状态，不能只信本地 box.checked。
+          renderAnchorRows(container)
+        })
+
+        const name = document.createElement('span')
+        name.className = 'cb-name'
+        name.textContent = entry.name
+        name.title = entry.id
+
+        label.appendChild(box)
+        label.appendChild(name)
+
+        const why = document.createElement('span')
+        why.className = 'cb-slot'
+        why.textContent = entry.hint
+
+        row.appendChild(label)
+        row.appendChild(why)
+        container.appendChild(row)
+      }
+    }
+
+    /** 打开面板：列出按钮位置 + 控件清单 + 开关 + 全部恢复 + 重新扫描。 */
+    function openPanel(anchorBtn, hidden) {
+      closePanel()
+
+      const panel = document.createElement('div')
+      panel.className = 'cb-panel'
+
+      const head = document.createElement('div')
+      head.className = 'cb-head'
+      const title = document.createElement('span')
+      title.className = 'cb-title'
+      title.textContent = '输入框按钮管家'
+      head.appendChild(title)
+
+      const actions = document.createElement('div')
+      actions.className = 'cb-actions'
+
+      const listEl = document.createElement('div')
+
+      /** 统一提交：本地即时落盘 + 应用 DOM + 上报 host + 刷新侦察快照。 */
+      const commit = useCallbackLike(() => {
+        // 走 commitHidden 而不是自己拼 writeLocal/pushHost：后者只写 hidden，
+        // 会把 state.json 里的 anchors 覆盖掉（v0.3.0 起两者同在一个 state 文件）。
+        commitHidden(Array.from(hidden))
+        renderRows(listEl, hidden, commit)
+      })
+
+      const rescan = document.createElement('button')
+      rescan.type = 'button'
+      rescan.className = 'cb-btn'
+      rescan.textContent = '重新扫描'
+      rescan.addEventListener('click', () => renderRows(listEl, hidden, commit))
+
+      const restore = document.createElement('button')
+      restore.type = 'button'
+      restore.className = 'cb-btn'
+      restore.textContent = '全部恢复'
+      restore.addEventListener('click', () => {
+        hidden.clear()
+        commit()
+      })
+
+      const close = document.createElement('button')
+      close.type = 'button'
+      close.className = 'cb-btn'
+      close.textContent = '关闭'
+      close.addEventListener('click', () => closePanel())
+
+      actions.appendChild(rescan)
+      actions.appendChild(restore)
+      actions.appendChild(close)
+      head.appendChild(actions)
+
+      const hint = document.createElement('div')
+      hint.className = 'cb-section'
+      hint.style.fontSize = '11px'
+      hint.style.opacity = '.7'
+      hint.textContent = '只隐藏界面，不卸载插件——被隐藏的插件仍在后台运行。要彻底停用请用侧栏「插件」页的开关。'
+
+      // ── 按钮显示位置（v0.3.0） ──────────────────────────────────────────
+      // 用户 2026-11-11 要求：「把能放这个按键的地方都提供出来，用户选择在哪个位置显示」。
+      // 可多选、默认勾 composer.dock；固定入口（本面板所在的设置页/侧栏更多）不参与勾选。
+      const anchorSection = document.createElement('div')
+      anchorSection.className = 'cb-section'
+      const anchorTitle = document.createElement('div')
+      anchorTitle.className = 'cb-subtitle'
+      anchorTitle.textContent = '按钮显示位置（可多选，勾上即出现）'
+      const anchorRows = document.createElement('div')
+      anchorSection.appendChild(anchorTitle)
+      anchorSection.appendChild(anchorRows)
+      renderAnchorRows(anchorRows)
+
+      panel.appendChild(head)
+      panel.appendChild(anchorSection)
+      panel.appendChild(listEl)
+      panel.appendChild(hint)
+
+      renderRows(listEl, hidden, commit)
+      // 面板打开即上报快照：这是最需要真实 DOM 事实的时刻。
+      reportScan()
+
+      // 定位：贴着按钮下方；空间不足则上翻。全部用视口坐标（panel 是 fixed）。
+      document.body.appendChild(panel)
+      const rect = anchorBtn.getBoundingClientRect()
+      const pw = panel.offsetWidth
+      const ph = panel.offsetHeight
+      const left = Math.min(Math.max(8, rect.left + rect.width / 2 - pw / 2), window.innerWidth - pw - 8)
+      const top = rect.top - ph - 8 >= 8 ? rect.top - ph - 8 : rect.bottom + 8
+      panel.style.left = `${Math.round(left)}px`
+      panel.style.top = `${Math.round(Math.min(top, window.innerHeight - ph - 8))}px`
+
+      panelEl = panel
+
+      // 点外部关闭；Escape 关闭。
+      const onDocDown = (event) => {
+        if (panel.contains(event.target)) return
+        if (anchorBtn.contains(event.target)) return
+        closePanel()
+      }
+      const onKey = (event) => {
+        if (event.key === 'Escape') closePanel()
+      }
+      document.addEventListener('mousedown', onDocDown, true)
+      document.addEventListener('keydown', onKey, true)
+      panelCleanup = () => {
+        document.removeEventListener('mousedown', onDocDown, true)
+        document.removeEventListener('keydown', onKey, true)
+      }
+    }
+
+    /** 无 hook 场景下的稳定回调包装（面板用原生 DOM，不需要 React 依赖）。 */
+    function useCallbackLike(fn) {
+      return fn
+    }
+
+    // ── 组件 ────────────────────────────────────────────────────────────────
+    /**
+     * 「⋯」按钮。点击打开管家面板。
+     * 状态从 localStorage 读一次，之后由面板内部维护。
+     */
+    function ButlerButton() {
+      const ref = useRef(null)
+      const onClick = useCallback(() => {
+        if (panelEl !== null) {
+          closePanel()
+          return
+        }
+        if (ref.current !== null) openPanel(ref.current, getHidden())
+      }, [])
+
+      return h('button', {
+        ref,
+        type: 'button',
+        title: '输入框按钮管家：自定义显示哪些控件',
+        'aria-label': '输入框按钮管家',
+        [SELF_ATTR]: '1',
+        onClick,
+        style: {
+          background: 'transparent',
+          border: '1px solid var(--dsh-border, #d9d9d9)',
+          borderRadius: '6px',
+          cursor: 'pointer',
+          padding: '2px 8px',
+          lineHeight: 1.4,
+          fontSize: '14px',
+          color: 'inherit',
+        },
+      }, '⋯')
+    }
+
+    /**
+     * 悬浮球（v0.3.0，`shell.overlay` 位置）：固定右下角，任何页面都看得见。
+     * 默认不勾选——它会浮在设置页等所有界面上，可能挡住右下角内容。
+     */
+    function FloatingButlerButton() {
+      const ref = useRef(null)
+      const onClick = useCallback(() => {
+        if (panelEl !== null) {
+          closePanel()
+          return
+        }
+        if (ref.current !== null) openPanel(ref.current, getHidden())
+      }, [])
+
+      return h('button', {
+        ref,
+        type: 'button',
+        className: 'cb-float',
+        title: '输入框按钮管家：自定义显示哪些控件',
+        'aria-label': '输入框按钮管家',
+        [SELF_ATTR]: '1',
+        onClick,
+      }, '⋯')
+    }
+
+    /**
+     * 位置开关（v0.3.0）：把候选位置包一层，只有被勾选时才渲染内部组件。
+     *
+     * 为什么用「全量注册 + 组件自决渲染」而不是「切换时动态注册/注销」：
+     * 九个位置一次性注册好，切换位置只是改一份 Set（React 重渲染），
+     * 不依赖 slots.register 的返回值能否当注销函数用——那属于未公开契约，
+     * 猜错会出现「旧位置的按钮残留 / 新位置不出现」这类只能在界面上看出来的坏。
+     *
+     * 未选中时返回 null：React 不产生任何 DOM，对官方布局零影响。
+     * 但 slot entry 本身仍在册（例如 sidebar.footer.action 这类 list 槽位会
+     * 认为「有注册项」），这与 v0.2.1 的行为一致，不会让官方容器多出可见元素。
+     */
+    function makeAnchorGate(anchorId, kind) {
+      function AnchorGate(props) {
+        const anchors = useAnchors()
+        if (!anchors.has(anchorId)) return null
+        if (kind === 'float') return h(FloatingButlerButton, null)
+        return h(ButlerButton, props ?? {})
+      }
+      return AnchorGate
+    }
+
+    /**
+     * 「按钮显示位置」选择区（React 版，设置页与插件详情页共用）。
+     * 与原生面板版 renderAnchorRows 共用 getAnchors / toggleAnchor，状态只有一份。
+     */
+    function AnchorPlacement() {
+      const anchors = useAnchors()
+      return h('div', { 'data-cb-anchors': '1' },
+        h('p', { style: { margin: '0 0 8px', opacity: 0.75, fontSize: 13 } },
+          '按钮显示位置（可多选，勾上即在对应位置出现「⋯」，改完立即生效并保存）。设置页与侧栏「更多」这两个入口固定保留，不会被关掉。'),
+        ANCHOR_CATALOG.map((entry) => h('div', {
+          key: entry.id,
+          style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 2px' },
+        },
+          h('label', { style: { display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', flex: 1, minWidth: 0 } },
+            h('input', {
+              type: 'checkbox',
+              checked: anchors.has(entry.id),
+              onChange: (event) => toggleAnchor(entry.id, event.target.checked),
+            }),
+            h('span', {
+              title: entry.id,
+              style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+            }, entry.name)),
+          h('span', { style: { fontSize: 11, opacity: 0.6 } }, entry.hint))))
+    }
+
+    /**
+     * 「设置 → 输入框按钮管家」分区：常驻、不受工具栏宽度影响。
+     *
+     * 为什么需要它（实测教训 2026-11-10）：工具栏上的「⋯」入口在窄窗口/控件多时
+     * 会被官方换行挤掉，用户找不到入口就无法改设置。设置分区是官方常驻位置，
+     * 与工具栏入口共用同一份状态与同一套提交逻辑（commitHidden）。
+     */
+    function ButlerSettings() {
+      const [snapshot, setSnapshot] = useState(() => scanControls())
+
+      // 分区打开时重扫一次：控件可能因插件热装配增减。
+      useEffect(() => {
+        setSnapshot(scanControls())
+        reportScan()
+      }, [])
+
+      const nameCount = new Map()
+      for (const control of snapshot) nameCount.set(control.label, (nameCount.get(control.label) ?? 0) + 1)
+
+      const toggle = (key, on) => {
+        const next = Array.from(getHidden())
+        if (on) {
+          if (!next.includes(key)) next.push(key)
+        } else {
+          const at = next.indexOf(key)
+          if (at >= 0) next.splice(at, 1)
+        }
+        commitHidden(next)
+        setSnapshot(scanControls())
+      }
+
+      const restoreAll = () => {
+        commitHidden([])
+        setSnapshot(scanControls())
+      }
+
+      const rescan = () => {
+        setSnapshot(scanControls())
+        reportScan()
+      }
+
+      const box = { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 2px', borderRadius: 6 }
+      const mono = { fontSize: 11, opacity: 0.6, fontFamily: 'monospace' }
+
+      return h('div', { style: { maxWidth: 640 } },
+        // v0.3.0：「按钮显示位置」放在最前面——决定入口在哪，比决定隐藏哪些控件更优先。
+        h('div', { style: { marginBottom: 16, paddingBottom: 12, borderBottom: '1px solid var(--dsh-border,#eee)' } },
+          h(AnchorPlacement, null)),
+        h('p', { style: { margin: '0 0 12px', opacity: 0.75, fontSize: 13 } },
+          '勾选即隐藏对应控件。只隐藏界面，不卸载插件——被隐藏的插件仍在后台运行；要彻底停用请去「插件」页的开关。'),
+        snapshot.length === 0
+          ? h('p', { style: { opacity: 0.65 } }, '未在输入框工具栏发现控件，请先打开一个会话，或点「重新扫描」。')
+          : h('div', null, snapshot.map((control) => h('div', { key: control.key, style: box },
+              h('label', { style: { display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', flex: 1, minWidth: 0 } },
+                h('input', {
+                  type: 'checkbox',
+                  checked: getHidden().has(control.key),
+                  onChange: (event) => toggle(control.key, event.target.checked),
+                }),
+                h('span', { title: control.key, style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, control.label),
+                (nameCount.get(control.label) ?? 0) > 1
+                  ? h('span', { style: { fontSize: 11, color: '#c87b22', border: '1px solid currentColor', borderRadius: 4, padding: '0 4px' }, title: '同一工具栏里有多个同名控件（多半来自功能相近的两个插件）' }, '重复')
+                  : null),
+              h('span', { style: mono }, control.slot.replace(SLOT_PREFIX, ''))
+            ))),
+        h('div', { style: { display: 'flex', gap: 8, marginTop: 12 } },
+          h('button', { type: 'button', className: 'cb-btn', onClick: rescan }, '重新扫描'),
+          h('button', { type: 'button', className: 'cb-btn', onClick: restoreAll }, '全部恢复'))
+      )
+    }
+
+    /**
+     * 插件详情页配置区（`plugins.bundle.config`，keyed slot，scope root）。
+     *
+     * 官方 plugin-manager 的消费点（源码核实，行 6022）：
+     *   renderSlot("plugins.bundle.config", { view: "page" }, { entryKey: pkg.name })
+     * slot 声明为 `{ kind: "keyed", scope: "root" }`，keyed slot 同一 key 只能注册一次，
+     * 所以 register 的 `key` 必须与 package.json 的 name 完全一致。
+     *
+     * 两个视图：page = 完整设置面板（与「设置 → 输入框按钮管家」同源同状态）；
+     * summary = 一行摘要 + 全部恢复，避免把长列表塞进插件卡片。
+     *
+     * ⚠️ v0.2.0 的教训：这里只写了 `h(ButlerPluginConfig, …)` 却**没有定义**该组件，
+     * 打开插件详情页会抛 ReferenceError，被官方 SlotErrorBoundary 吞掉，界面表现为
+     * 配置区一片空白（不报错、无日志）。v0.2.1 补齐定义。
+     */
+    function ButlerPluginConfig(props) {
+      const [tick, setTick] = useState(0)
+      const view = props?.view === 'summary' ? 'summary' : 'page'
+      if (view === 'page') return h(ButlerSettings, null)
+
+      const snapshot = scanControls()
+      return h('div', {
+        'data-cb-plugin-config': 'summary',
+        'data-cb-tick': tick,
+        style: { display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' },
+      },
+        h('span', { style: { fontSize: 13, opacity: 0.8 } },
+          `工具栏控件 ${snapshot.length} 个，已隐藏 ${getHidden().size} 个`),
+        h('button', {
+          type: 'button',
+          className: 'cb-btn',
+          onClick: () => {
+            commitHidden([])
+            setTick(tick + 1)
+          },
+        }, '全部恢复'))
+    }
+
+    /**
+     * 侧栏「更多」菜单里的一行（用户 2026-11-10 指定的位置）。
+     *
+     * 协议对照官方 entry-customization 的 sidebar.panellist.actions 注册：
+     * 菜单行先 onDismiss 收起菜单，再执行动作。这里动作是打开管家面板，
+     * 用一个视口中央的虚拟锚点定位（面板本身是 fixed 原生 DOM，不依赖按钮位置）。
+     *
+     * 安全性：该 slot 不在注入器 KNOWN_SLOTS 里，但校验是「文件内存在任意一个
+     * 白名单注册即通过」（REGISTER_NAME 为非贪婪全文 test），本文件已有
+     * conversation.input.dock 与 settings.section 两个白名单项兜底，故不会被跳过恢复。
+     */
+    function SidebarButlerRow(props) {
+      const onDismiss = typeof props?.onDismiss === 'function' ? props.onDismiss : () => {}
+      const onClick = useCallback(() => {
+        onDismiss()
+        if (panelEl !== null) {
+          closePanel()
+          return
+        }
+        openPanel(makeViewportAnchor(), getHidden())
+      }, [onDismiss])
+
+      // 与官方菜单行同构（Menu / MenuItemButton 的观感）：整行可点、hover 高亮、
+      // 左侧图标 + 文案 + 右侧灰字说明。样式走 --dsw-* 变量（官方主题前缀），
+      // 取不到时用浅灰兜底，深色主题下也不会变成刺眼白底。
+      const base = {
+        display: 'flex', alignItems: 'center', gap: 8, width: '100%',
+        background: 'transparent', border: 'none', cursor: 'pointer',
+        padding: '6px 8px', borderRadius: 6, fontSize: 14, lineHeight: '22px',
+        color: 'inherit', textAlign: 'left', font: 'inherit',
+      }
+      return h('button', {
+        type: 'button',
+        onClick,
+        title: '输入框按钮管家：自定义输入框工具栏显示哪些控件',
+        'aria-label': '输入框按钮管家',
+        [SELF_ATTR]: '1',
+        style: base,
+        onMouseEnter: (event) => {
+          event.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,0.12))'
+        },
+        onMouseLeave: (event) => {
+          event.currentTarget.style.background = 'transparent'
+        },
+      },
+        h('span', { 'aria-hidden': 'true', style: { flex: 'none', width: 16, textAlign: 'center' } }, '⋯'),
+        h('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, '输入框按钮管家'),
+        h('span', { style: { flex: 'none', fontSize: 11, opacity: 0.55 } }, '工具栏显隐'))
+    }
+
+    /** 虚拟锚点：让面板落在视口中部，供无按钮场景（菜单行）使用。 */
+    function makeViewportAnchor() {
+      return {
+        getBoundingClientRect: () => ({
+          left: window.innerWidth * 0.5 - 120,
+          top: window.innerHeight * 0.5 - 60,
+          right: window.innerWidth * 0.5 - 120 + 240,
+          bottom: window.innerHeight * 0.5 - 60 + 120,
+          width: 240,
+          height: 120,
+        }),
+        contains: () => false,
+      }
+    }
+
+    /**
+     * 注册诊断（2026-11-10 加）：⋯ 按钮从未成功渲染，需要事实而非猜测。三层递进：
+     *  - attempted：apply 已声明要挂这个 slot；
+     *  - declared：官方 slots.inject 的 callback 被执行过 —— 源码核实该 callback
+     *    仅在 `spec !== void 0`（slot 已被官方声明）时才跑，所以「attempted 有、
+     *    declared 无」= 官方在这个页面根本没声明该 slot；
+     *  - rendered：我们的组件真的被 React 调用过 —— 「declared 有、rendered 无」
+     *    = slot 存在但渲染条件不满足（例如 scope: session 而无会话）。
+     *
+     * ⚠️ 刻意**不**把 register 调用包进辅助函数：注入器 clientSkeletonProblems 用
+     * 正则 `register\(\{[\s\S]*?name:['"]<白名单>['"]` 判定骨架合法性，包一层就匹配
+     * 不到字面量 → 宿主重启被判坏骨架跳过恢复（实测踩过，见迭代记录 v0.2.0）。
+     * 因此三处注册保持 `slots.register({ name: '…' }, …)` 的字面量写法。
+     */
+    const diag = { attempted: [], declared: [], rendered: [], errors: [] }
+
+    /** 标记某 slot 已被官方声明（inject callback 被执行）。 */
+    function markDeclared(slotName) {
+      if (!diag.declared.includes(slotName)) diag.declared.push(slotName)
+    }
+
+    /** 包一层组件以记录它是否真的被渲染过。 */
+    function trackRender(slotName, Comp) {
+      return (props) => {
+        if (!diag.rendered.includes(slotName)) diag.rendered.push(slotName)
+        return h(Comp, props)
+      }
+    }
+
+    // ── 应用 ────────────────────────────────────────────────────────────────
+    /**
+     * 挂载：注入样式 → 恢复已保存的隐藏状态 → 用 MutationObserver 让新渲染的
+     * 控件自动继承状态（DSH 切换会话/新插件热装配时 DOM 会重建）。
+     */
+    function apply(ctx) {
+      ensureStyle()
+
+      const hidden = getHidden()
+      applyHidden(Array.from(hidden))
+
+      // host 上的 state.json 是权威副本：本地为空时用它补一次（换浏览器/清缓存场景）。
+      if (hidden.size === 0) {
+        void fetch(`${API_BASE}/state`)
+          .then((r) => (r.ok ? r.json() : null))
+          .then((data) => {
+            const remote = Array.isArray(data?.hidden) ? data.hidden : []
+            if (remote.length === 0) return
+            // 原地改单例（不能重新赋值，否则 observer 与面板还持旧引用）。
+            hidden.clear()
+            for (const key of remote) hidden.add(key)
+            writeLocal(remote)
+            applyHidden(remote)
+          })
+          .catch(() => {})
+      }
+
+      // 位置配置（v0.3.0）同样以 host 的 state.json 为权威副本。
+      // 只在「本地从未存过」时补一次：用户显式全取消（存成 []）不能被远端默认值顶回来。
+      const anchors = getAnchors()
+      if (window.localStorage?.getItem(ANCHORS_KEY) === null) {
+        void fetch(`${API_BASE}/state`)
+          .then((r) => (r.ok ? r.json() : null))
+          .then((data) => {
+            const remote = Array.isArray(data?.anchors) ? data.anchors : []
+            if (remote.length === 0) return
+            const known = new Set(ANCHOR_CATALOG.map((entry) => entry.id))
+            const next = remote.filter((id) => typeof id === 'string' && known.has(id))
+            if (next.length === 0) return
+            // 原地改单例（不能重新赋值，否则已渲染的组件还持旧引用）。
+            anchors.clear()
+            for (const id of next) anchors.add(id)
+            writeAnchorLocal(next)
+            bumpAnchors()
+          })
+          .catch(() => {})
+      }
+
+      // DOM 变动后重新套用（节流：合并 60ms 内的连续变动）。
+      let pending = 0
+      const observer = new MutationObserver(() => {
+        if (pending !== 0) return
+        pending = window.setTimeout(() => {
+          pending = 0
+          if (hidden.size > 0) applyHidden(Array.from(hidden))
+        }, 60)
+      })
+      observer.observe(document.body, { childList: true, subtree: true })
+
+      ctx.effect(() => () => {
+        if (pending !== 0) window.clearTimeout(pending)
+        observer.disconnect()
+        closePanel()
+      }, 'composer-butler: observer')
+
+      // 页面加载后自动上报一次快照（composer 渲染晚于模块加载，延迟 2s）。
+      // 不打开面板也有事实可查，用于排查控件身份漂移。
+      const bootScanTimer = window.setTimeout(reportScan, 2000)
+      ctx.effect(() => () => window.clearTimeout(bootScanTimer), 'composer-butler: boot scan')
+
+      // ── 可选按钮位置（v0.3.0） ──────────────────────────────────────────
+      // 用户 2026-11-11 要求：「把能放这个按键的地方都提供出来，用户选择在哪个位置显示」。
+      // 九个位置一次性注册，各位置组件读 getAnchors() 决定自己渲不渲染：
+      //  - 切换位置只是改一份 Set + React 重渲染，不依赖 slots.register 的返回值
+      //    能否当注销函数用（那是未公开契约，猜错会留下「旧位置按钮残留」这类坏）；
+      //  - 未选中时组件返回 null，React 不产生 DOM，对官方布局零影响。
+      //
+      // ⚠️ composer.dock 这一条必须保持 `register({ ... name: '...' })` 的字面量写法：
+      // 注入器 clientSkeletonProblems 用正则在本文件里搜白名单 slot 的 register 字面量
+      // （KNOWN_SLOTS 含 conversation.composer.dock / settings.section），靠它判定
+      // 「骨架合法、重启可以恢复」。下面的循环注册不在白名单内，但只要这一条还在，校验就过。
+      ctx.effect(() => {
+        diag.attempted.push('conversation.composer.dock')
+        return ctx.slots.inject('conversation.composer.dock', () => {
+          markDeclared('conversation.composer.dock')
+          return ctx.slots.register({
+            name: 'conversation.composer.dock',
+            id: 'composer-butler',
+            order: 900,
+            label: () => '输入框按钮管家',
+          }, trackRender('conversation.composer.dock', makeAnchorGate('conversation.composer.dock', 'inline')))
+        })
+      }, 'composer-butler: composer 按钮')
+
+      // 其余八个位置：同一个模式批量注册（名字取自 ANCHOR_CATALOG，不重复写死）。
+      for (const anchor of ANCHOR_CATALOG) {
+        if (anchor.id === 'conversation.composer.dock') continue
+        const kind = anchor.id === 'shell.overlay' ? 'float' : 'inline'
+        ctx.effect(() => {
+          diag.attempted.push(anchor.id)
+          return ctx.slots.inject(anchor.id, () => {
+            markDeclared(anchor.id)
+            return ctx.slots.register({
+              name: anchor.id,
+              id: 'composer-butler',
+              order: anchor.order,
+              label: () => '输入框按钮管家',
+            }, trackRender(anchor.id, makeAnchorGate(anchor.id, kind)))
+          })
+        }, `composer-butler: ${anchor.id}`)
+      }
+
+      // 常驻入口：设置 → 输入框按钮管家。窄窗口把工具栏按钮挤掉时，这里始终能改。
+      ctx.effect(() => {
+        diag.attempted.push('settings.section')
+        return ctx.slots.inject('settings.section', () => {
+          markDeclared('settings.section')
+          return ctx.slots.register({
+            name: 'settings.section',
+            id: 'composer-butler',
+            order: 36,
+            label: () => '输入框按钮管家',
+          }, trackRender('settings.section', () => h(ButlerSettings, null)))
+        })
+      }, 'composer-butler: 设置分区')
+
+      // 用户 2026-11-10 指定位置：侧栏「更多」菜单里加一行，点开即改。
+      // order 用负值（-100）而不是正数：list slot 按 (priority, order) 升序渲染，
+      // 官方 entry-customization 的行没设 order（默认 0）且会列出全部面板条目，
+      // 正数会让我们这一行掉到菜单最底部（屏幕矮时得滚动才看得见，v0.2.0 即如此）。
+      ctx.effect(() => {
+        diag.attempted.push('sidebar.panellist.actions')
+        return ctx.slots.inject('sidebar.panellist.actions', () => {
+          markDeclared('sidebar.panellist.actions')
+          return ctx.slots.register({
+            name: 'sidebar.panellist.actions',
+            id: 'composer-butler',
+            order: -100,
+            label: () => '输入框按钮管家',
+          }, trackRender('sidebar.panellist.actions', (props) => h(SidebarButlerRow, props ?? {})))
+        })
+      }, 'composer-butler: 侧栏更多菜单行')
+
+      // 插件详情页配置区（用户 2026-11-10 要求「点进去还能更多设置」）。
+      // 协议对照已装插件 @michengai/dsh-pua 实测写法：
+      //   inject('plugins.bundle.config') → register({ name, key: <bundle 包名> }, Comp)
+      //   官方按 view 区分两种渲染：'summary' 卡片摘要、'page' 完整页面。
+      // 该 slot 不在注入器 KNOWN_SLOTS 内，但同文件已有 composer.dock / settings.section
+      // 两个白名单注册兜底（校验是「存在任意一个」），故不影响重启恢复。
+      ctx.effect(() => {
+        diag.attempted.push('plugins.bundle.config')
+        return ctx.slots.inject('plugins.bundle.config', () => {
+          markDeclared('plugins.bundle.config')
+          return ctx.slots.register({
+            name: 'plugins.bundle.config',
+            key: '@lanbaolu/dsh-composer-butler',
+          }, trackRender('plugins.bundle.config', (props) => h(ButlerPluginConfig, props ?? {})))
+        })
+      }, 'composer-butler: 详情页配置区')
+    }
+
+    exports.apply = apply
+    exports.inject = inject
+    exports.name = '@lanbaolu/dsh-composer-butler'
+    // 便于在浏览器控制台手工核对（不作为公开 API）。
+    exports.__test = { scanControls, identityOf, applyHidden, getAnchors, commitAnchors, ANCHOR_CATALOG }
+    return module.exports
+  },
+})
