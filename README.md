@@ -2,7 +2,7 @@
 
 > **一句话**：给你的 DSH 输入框工具栏装一个「总开关面板」——把那些你可能一年用一次、却天天占着地方的按钮收起来，想用的时候一条命令全放回来。
 
-[![版本](https://img.shields.io/badge/version-0.3.0-blue)](https://github.com/duma520/dsh-composer-butler/releases)
+[![版本](https://img.shields.io/badge/version-0.3.1-blue)](https://github.com/duma520/dsh-composer-butler/releases)
 [![许可](https://img.shields.io/badge/license-BSD--3--Clause-green)](LICENSE)
 [![平台](https://img.shields.io/badge/platform-DSH%20Web%20GUI-purple)](https://github.com/duma520/dsh-composer-butler)
 [![构建](https://img.shields.io/badge/build-%E9%9B%B6%E6%9E%84%E5%BB%BA-brightgreen)](https://github.com/duma520/dsh-composer-butler)
@@ -207,11 +207,11 @@ C:\Users\<你>\.dsh\profiles\web\          ← Web 版
 假设 profile 是 `desktop`：
 
 ```bat
-mkdir "C:\Users\%USERNAME%\.dsh\profiles\desktop\node_modules\@lanbaolu"
-xcopy /E /I /Y "解压出来的目录" "C:\Users\%USERNAME%\.dsh\profiles\desktop\node_modules\@lanbaolu\dsh-composer-butler"
+mkdir "C:\Users\%USERNAME%\.dsh\profiles\desktop\node_modules\@duma520"
+xcopy /E /I /Y "解压出来的目录" "C:\Users\%USERNAME%\.dsh\profiles\desktop\node_modules\@duma520\dsh-composer-butler"
 ```
 
-> 包名是 `@lanbaolu/dsh-composer-butler`，所以目录必须是 `node_modules\@lanbaolu\dsh-composer-butler`。**层级少一层都加载不到**。
+> 包名是 `@duma520/dsh-composer-butler`，所以目录必须是 `node_modules\@duma520\dsh-composer-butler`。**层级少一层都加载不到**。
 
 **第 3 步：在 profile 的 `package.json` 里登记两处**
 
@@ -221,11 +221,11 @@ xcopy /E /I /Y "解压出来的目录" "C:\Users\%USERNAME%\.dsh\profiles\deskto
 {
   "dependencies": {
     // ……原有内容……
-    "@lanbaolu/dsh-composer-butler": "0.1.0"     // ← 加上这一行
+    "@duma520/dsh-composer-butler": "0.1.0"     // ← 加上这一行
   },
   "bundles": [
     // ……原有内容……
-    "@lanbaolu/dsh-composer-butler"               // ← 再加这一行
+    "@duma520/dsh-composer-butler"               // ← 再加这一行
   ]
 }
 ```
@@ -283,7 +283,7 @@ dev_uninject_plugin  dsh-composer-butler
 
 你就是要改代码，那就别走上面两条：
 
-1. 把源码目录 junction 到 profile 的 `node_modules\@lanbaolu\dsh-composer-butler`；
+1. 把源码目录 junction 到 profile 的 `node_modules\@duma520\dsh-composer-butler`；
 2. profile `package.json` 的 `bundles` 加上包名；
 3. 改完 `lib\client.js` 或 `lib\index.js` 后：
    - 有注入器：`dev_reload_package dsh-composer-butler`
@@ -330,12 +330,12 @@ composer_butler_status
 
 **第 1 步：让它不再装配**
 
-从 profile `package.json` 的 `bundles` 数组里删掉 `"@lanbaolu/dsh-composer-butler"`（`dependencies` 里那行一起删更干净）。
+从 profile `package.json` 的 `bundles` 数组里删掉 `"@duma520/dsh-composer-butler"`（`dependencies` 里那行一起删更干净）。
 
 **第 2 步：删包**
 
 ```bat
-rmdir /S /Q "C:\Users\%USERNAME%\.dsh\profiles\desktop\node_modules\@lanbaolu\dsh-composer-butler"
+rmdir /S /Q "C:\Users\%USERNAME%\.dsh\profiles\desktop\node_modules\@duma520\dsh-composer-butler"
 ```
 
 > 如果这个目录是 junction（链接），**不要**用 `rmdir /S`，改用 `rmdir` 只删链接本身。
@@ -422,7 +422,7 @@ v0.2.1 起面板有三个**固定**入口（v0.3.0 又能额外把 `⋯` 挂到�
 ### 3.1.1 插件详情页也有配置区
 
 「插件」页点开本插件的详情，会多出一块配置区（`plugins.bundle.config`，keyed 槽位，
-key 就是包名 `@lanbaolu/dsh-composer-butler`）。这里的 `page` 视图渲染与设置页完全相同的面板，
+key 就是包名 `@duma520/dsh-composer-butler`）。这里的 `page` 视图渲染与设置页完全相同的面板，
 `summary` 视图只给「工具栏控件 N 个，已隐藏 M 个」+ 一个「全部恢复」按钮。
 
 > v0.2.0 这里引用了一个**没定义**的组件 `ButlerPluginConfig`，打开插件详情页会抛
@@ -760,7 +760,7 @@ slot "conversation.input.permission" is single
 ```yaml
 - insert:
     - id: composer-butler
-      name: '@lanbaolu/dsh-composer-butler'
+      name: '@duma520/dsh-composer-butler'
       config:
         dataDir: 'D:\dsh-data\composer-butler'
 ```
@@ -771,7 +771,7 @@ slot "conversation.input.permission" is single
 
 ### 5.6 HTTP API 全表
 
-前缀：`/@lanbaolu/dsh-composer-butler/api`
+前缀：`/@duma520/dsh-composer-butler/api`
 
 | 方法 | 路径 | 请求体 | 响应 | 说明 |
 |---|---|---|---|---|
@@ -788,14 +788,14 @@ slot "conversation.input.permission" is single
 
 ```powershell
 # 看数据目录
-Invoke-RestMethod http://127.0.0.1:9603/@lanbaolu/dsh-composer-butler/api/info
+Invoke-RestMethod http://127.0.0.1:9603/@duma520/dsh-composer-butler/api/info
 
 # 看当前隐藏清单
-Invoke-RestMethod http://127.0.0.1:9603/@lanbaolu/dsh-composer-butler/api/state
+Invoke-RestMethod http://127.0.0.1:9603/@duma520/dsh-composer-butler/api/state
 
 # 一键全部恢复（等价于点面板上的「全部恢复」，只清 hidden，不动 anchors）
 Invoke-RestMethod -Method Post `
-  -Uri http://127.0.0.1:9603/@lanbaolu/dsh-composer-butler/api/state `
+  -Uri http://127.0.0.1:9603/@duma520/dsh-composer-butler/api/state `
   -ContentType 'application/json' `
   -Body '{"hidden":[],"anchors":["conversation.composer.dock"],"updatedAt":"2026-11-10T00:00:00Z"}'
 ```
@@ -967,7 +967,7 @@ v0.1.0 开发期踩过——`apply()` 的闭包持有 `Set A`，面板组件持�
 | 文件 | `lib/index.js` | `lib/client.js` |
 | 运行在 | Node 进程（服务端） | 浏览器 |
 | 能做什么 | 注册 HTTP 路由、读写文件、注册工具 | 操作 DOM、渲染 UI、读写 localStorage |
-| 导出 `name` | `'@lanbaolu/dsh-composer-butler'` | — |
+| 导出 `name` | `'@duma520/dsh-composer-butler'` | — |
 | 声明 `inject` | `['webServer', 'tools']` | `['slots']` |
 | 注册的 effect | `'composer-butler: api'`、`'composer-butler: status tool'` | 一个 slot 注册 |
 
@@ -982,7 +982,7 @@ v0.1.0 开发期踩过——`inject` 只写了 `['webServer']`，没写 `'tools'
 `lib/client.js` 是**手写的** bundle：
 
 ```js
-window.__ModuleLoader__.load({ id: '@lanbaolu/dsh-composer-butler/client', factory: (require) => { … } })
+window.__ModuleLoader__.load({ id: '@duma520/dsh-composer-butler/client', factory: (require) => { … } })
 ```
 
 它只 `require('react')`，而 `react` 由 shell 提供（`dsh.client.inject` 里声明了 `@deepseek-ai/dsh-client-runtime` 与 `@deepseek-ai/dsh-client-ui-slots`）。
@@ -1005,10 +1005,10 @@ window.__ModuleLoader__.load({ id: '@lanbaolu/dsh-composer-butler/client', facto
 
 ```
 ┌─ DSH 启动 ─────────────────────────────────────────┐
-│ 1. bundles 里发现 @lanbaolu/dsh-composer-butler    │
+│ 1. bundles 里发现 @duma520/dsh-composer-butler    │
 │ 2. 读 cordis.patch.yml → insert entry              │
 │ 3. 加载 lib/index.js（host 半身）                   │
-│    ├─ 建 /@lanbaolu/dsh-composer-butler/api 路由    │
+│    ├─ 建 /@duma520/dsh-composer-butler/api 路由    │
 │    └─ 注册工具 composer_butler_status               │
 └────────────────────────────────────────────────────┘
                      ↓
@@ -1084,7 +1084,7 @@ setTick(n => n + 1)   // 而不是 setAnchors(new Set(anchorSet))
 
 - client 半身没加载（最常见：注入后没刷新页面）
 - `bundles` 里没加包名（只加了 `dependencies`）
-- 包目录层级不对（不是 `node_modules\@lanbaolu\dsh-composer-butler`）
+- 包目录层级不对（不是 `node_modules\@duma520\dsh-composer-butler`）
 - slot 名不匹配（你的 DSH 版本里 `conversation.composer.dock` 不存在）
 - 工具栏那一行被挤掉了（窄窗口 / 控件多）—— 改用「设置 → 输入框按钮管家」或侧栏「更多」菜单行
 
@@ -1164,10 +1164,10 @@ setTick(n => n + 1)   // 而不是 setAnchors(new Set(anchorSet))
 **原因**：路径拼错。前缀必须完整：
 
 ```
-/@lanbaolu/dsh-composer-butler/api/info
+/@duma520/dsh-composer-butler/api/info
 ```
 
-注意开头的 `/@`、中间的 `@lanbaolu/`，以及结尾的 `/api`。
+注意开头的 `/@`、中间的 `@duma520/`，以及结尾的 `/api`。
 
 ### 11. DSH 启动报错，插件 entry 变 `[no-fiber]`
 
@@ -1357,6 +1357,7 @@ npx --yes dsh-plugin-standard@2 . --json
 
 | 版本 | 日期 | 一句话 |
 |---|---|---|
+| **v0.3.1** | 2026-11-16 | 包名前缀 `@lanbaolu` → `@duma520`，HTTP 路由前缀同步变更（旧路由 404），功能零改动 |
 | **v0.3.0** | 2026-11-11 | 按钮位置可自定义：9 个位置任选（可多选、即时生效、持久化），新增右下角悬浮球；修复 `state.json` 并发写坏 |
 | **v0.2.1** | 2026-11-10 | 侧栏「更多」入口排到菜单最前（`order: -100`），修复插件详情页配置区空白（`ButlerPluginConfig` 未定义），README 勾选方向改正 |
 | **v0.2.0** | 2026-11-10 | 入口从 1 个变 3 个：工具栏 `⋯` + 设置页分区 + 侧栏「更多」菜单行；`commitHidden()` 统一提交出口 |
@@ -1395,16 +1396,16 @@ BSD-3-Clause，见 [LICENSE](LICENSE)。Copyright (c) 2026, duma520。
 ## 附录 B：一分钟速查卡
 
 ```
-装：  zip 解压 → node_modules\@lanbaolu\dsh-composer-butler
+装：  zip 解压 → node_modules\@duma520\dsh-composer-butler
       → profile package.json 的 dependencies + bundles 各加一行 → 重启 → Ctrl+F5
 用：  点「⋯」（或 设置 → 输入框按钮管家 / 侧栏「更多」→ 输入框按钮管家）
       勾上 = 隐藏；取消勾选 = 显示
 位置：面板顶部「按钮显示位置」9 个位置可多选，勾上 = 该处出现「⋯」
       默认只勾「输入框底部工具行」；右下角悬浮球要自己勾
 救：  「全部恢复」= 一键全显示；搞崩了删 state.json
-查：  GET  /@lanbaolu/dsh-composer-butler/api/info
-      GET  /@lanbaolu/dsh-composer-butler/api/state
-      GET  /@lanbaolu/dsh-composer-butler/api/scan
+查：  GET  /@duma520/dsh-composer-butler/api/info
+      GET  /@duma520/dsh-composer-butler/api/state
+      GET  /@duma520/dsh-composer-butler/api/scan
 卸：  bundles 删条目 → 删包目录 → 重启 → （可选）删 state/scan/rules
 坑：  ① 注入后必须刷新页面 ② 只隐藏不卸载 ③ 别手改 JSON 里的 key
 ```
