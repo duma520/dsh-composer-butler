@@ -429,7 +429,6 @@ key 就是包名 `@duma520/dsh-composer-butler`）。这里的 `page` 视图渲�
 > `ReferenceError`，被官方 `SlotErrorBoundary` 吞掉，表现为**配置区一片空白且不报错**。
 > v0.2.1 已补齐定义——如果以后又看到配置区空白，先查这一处。
 
-
 ### 3.2 面板逐行说明
 
 > 面板顶部还有一块「按钮显示位置」区（v0.3.0 新增），它管的是**本插件自己的 `⋯` 出现在哪**，
@@ -1240,7 +1239,7 @@ setTick(n => n + 1)   // 而不是 setAnchors(new Set(anchorSet))
 可能。若两个插件都往同一个控件上加属性，行为叠加。实际中作者没遇到过，因为这类插件极少。
 
 **Q14：源码能改吗？许可允许吗？**
-BSD-3-Clause，可以改、可以分发，保留版权声明即可。改完建议跑 `dsh-plugin-standard` 校验。
+AGPL-3.0，可以改、可以分发，保留版权声明即可。改完建议跑 `dsh-plugin-standard` 校验。
 
 **Q15：我发现 bug / 想加功能，怎么办？**
 到 <https://github.com/duma520/dsh-composer-butler/issues> 提。附上：DSH 版本、`scan.json` 对应片段、浏览器 Console 报错（如有）。**不要贴任何密钥、Cookie 或含个人信息的截图**。
@@ -1380,7 +1379,7 @@ npx --yes dsh-plugin-standard@2 . --json
 
 ### 12.2 许可
 
-BSD-3-Clause，见 [LICENSE](LICENSE)。Copyright (c) 2026, duma520。
+AGPL-3.0，见 [LICENSE](LICENSE)。Copyright (c) 2026, duma520。
 
 ---
 
