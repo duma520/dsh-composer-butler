@@ -3,7 +3,7 @@
 > **一句话**：给你的 DSH 输入框工具栏装一个「总开关面板」——把那些你可能一年用一次、却天天占着地方的按钮收起来，想用的时候一条命令全放回来。
 
 [![版本](https://img.shields.io/badge/version-0.3.1-blue)](https://github.com/duma520/dsh-composer-butler/releases)
-[![许可](https://img.shields.io/badge/license-BSD--3--Clause-green)](LICENSE)
+[![许可](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 [![平台](https://img.shields.io/badge/platform-DSH%20Web%20GUI-purple)](https://github.com/duma520/dsh-composer-butler)
 [![构建](https://img.shields.io/badge/build-%E9%9B%B6%E6%9E%84%E5%BB%BA-brightgreen)](https://github.com/duma520/dsh-composer-butler)
 
@@ -1295,7 +1295,7 @@ dsh-composer-butler/
 │   ├── index.js              # host 半身：HTTP 路由 + 状态工具
 │   └── client.js             # client 半身：按钮 + 面板 + DOM 显隐
 ├── README.md                 # 本文
-├── LICENSE                   # BSD-3-Clause
+├── LICENSE                   # AGPL-3.0
 ├── .gitignore                # 排除运行期数据与凭据
 ├── .gitattributes            # 统一 LF
 ├── 软件升级迭代记录.md         # 逐版变更记录
@@ -1418,3 +1418,12 @@ AGPL-3.0，见 [LICENSE](LICENSE)。Copyright (c) 2026, duma520。
 [⬆ 回到顶部](#输入框按键管家--dsh-composer-butler)
 
 </div>
+
+## 许可
+
+本项目采用 **GNU Affero General Public License v3.0（AGPL-3.0）** 发布。
+
+- 完整许可证条文见仓库根目录 [LICENSE](LICENSE)。
+- 你可以自由使用、修改、分发，包括用于商业用途，无需另行获得授权。
+- 若你修改后分发，或以网络服务方式提供本软件，必须按 AGPL-3.0 公开相应源代码。
+- 本仓库自 2026-11-23 起改用 AGPL-3.0；此前已按 MIT / BSD-3-Clause 发布的版本，其接收者依原许可证获得的授权继续有效。
